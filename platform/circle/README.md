@@ -32,6 +32,8 @@ in the container from `Dockerfile` - see the top-level README for the commands.
 | `NOUART=1` | No serial log and no serial keyboard: the build for a card that is played on |
 | `STATS=1` | Every ten seconds: CPU speed, audio queues, disk time, per-core work and sleep, MIDI voices |
 | `JIT=1` | An experimental AArch64 block translator; off by default and not faster than the interpreter |
+| `SBLOG=1` | Records the Sound Blaster's ports, DMA, interrupts and PCM for the `F4`/`F3` dumps |
+| `OPLLOG=1` | Records the OPL's register writes and status reads for the `F9`/`F8` commands |
 
 ## The serial link
 
@@ -45,6 +47,9 @@ from it:
 | `F6` | Press the front panel's reset button |
 | `FA`, address (4, LE), length (2, LE) | Print that much guest memory |
 | `FD` / `FC` / `FB` | Print / re-arm / freeze the guest exception ring |
+| `F5` | Print the video card's registers and the text geometry derived from them |
+| `F4` / `F3` | Print the Sound Blaster log / the last 32 KB of PCM it was given (`SBLOG=1`) |
+| `F9` / `F8` | Start / print the OPL register log (`OPLLOG=1`) |
 
 ## Tools in `debug/`
 
