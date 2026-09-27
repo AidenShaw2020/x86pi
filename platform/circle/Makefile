@@ -49,6 +49,10 @@ endif
 ifeq ($(STATS),1)
 DEFINE += -DCIRCLE_PC_STATS=1
 endif
+# Record the Sound Blaster's ports, DMA and interrupts; dumped with 0xF4.
+ifeq ($(SBLOG),1)
+DEFINE += -DSB_IO_LOG=1
+endif
 # Record the guest's OPL register writes for rendering off the board.
 ifeq ($(OPLLOG),1)
 DEFINE += -DADLIB_OPL_LOG=1

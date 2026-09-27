@@ -235,8 +235,22 @@ static inline void opl_log(unsigned port, unsigned val)
     g_opl_log[2u * g_opl_log_n + 1u] = ((port & 0xffffu) << 8) | (val & 0xffu);
     g_opl_log_n++;
 }
+
+/* A status read, logged as port | 0x8000 with the value returned.  The
+ * delay loops read it dozens of times in a row, so a read the same as the
+ * entry before it is left out. */
+static inline void opl_log_read(unsigned port, unsigned val)
+{
+    const uint32_t e = (((port | 0x8000u) & 0xffffu) << 8) | (val & 0xffu);
+    if (g_opl_log_n && g_opl_log[2u * g_opl_log_n - 1u] == e) return;
+    opl_log(port | 0x8000u, val);
+}
 #else
 static inline void opl_log(unsigned port, unsigned val)
+{
+    (void)port; (void)val;
+}
+static inline void opl_log_read(unsigned port, unsigned val)
 {
     (void)port; (void)val;
 }
@@ -380,6 +394,7 @@ uint32_t adlib_read(void *opaque, uint32_t nport)
                 s->adlibstatus = (uint8_t)st;
             }
             opl_diag_note(0xfe, s->adlibstatus, 1);
+            opl_log_read(nport, s->adlibstatus);
             return s->adlibstatus;
     }
     return 0xFF;

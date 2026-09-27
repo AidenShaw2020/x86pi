@@ -4,6 +4,7 @@
 #include <circle/usb/usbfloppydevice.h>
 #include "../../../src/blockdev.h"
 extern "C" {
+#include "../../../src/sblog.h"
 #include "../../../src/osd.h"
 #include "../../../src/settingsui.h"
 #include "../../../src/diskui.h"
@@ -502,6 +503,59 @@ void CKernel::DrainSerialKeys()
             /* The front panel's power and reset buttons. */
             else if (b == 0xf7u) m_SerialPanel = CFrontPanel::EventPower;
             else if (b == 0xf6u) m_SerialPanel = CFrontPanel::EventReset;
+#if SB_IO_LOG
+            /* The Sound Blaster's port, DMA and interrupt log, newest 8192. */
+            else if (b == 0xf4u) {
+                const uint32_t *e;
+                uint32_t first;
+                const uint32_t n = sblog_take(&e, &first);
+                if (n - first > 8192u) first = n - 8192u;
+                m_Log.Write("SBLOG", LogNotice, "begin %lu", (unsigned long)(n - first));
+                char line[8 * 18 + 1];
+                for (uint32_t i = first; i < n; i += 8) {
+                    int len = 0;
+                    for (uint32_t j = i; j < n && j < i + 8; j++) {
+                        const uint32_t *x = e + (j % 16384u) * 2u;
+                        len += snprintf(line + len, sizeof line - len, "%08lx:%07lx ",
+                                        (unsigned long)x[0], (unsigned long)x[1]);
+                    }
+                    m_Log.Write("SBLOG", LogNotice, "%s", line);
+                }
+                m_Log.Write("SBLOG", LogNotice, "end");
+            }
+            /* The bytes the card was given, the last 32 KB. */
+            else if (b == 0xf3u) {
+                const uint8_t *r;
+                const uint32_t n = sblog_pcm_take(&r);
+                const uint32_t first = n > 32768u ? n - 32768u : 0;
+                m_Log.Write("SBPCM", LogNotice, "begin %lu at %lu", (unsigned long)(n - first),
+                            (unsigned long)first);
+                static const char hex[] = "0123456789abcdef";
+                char line[2 * 64 + 1];
+                for (uint32_t i = first; i < n; i += 64) {
+                    int len = 0;
+                    for (uint32_t j = i; j < n && j < i + 64; j++) {
+                        const uint8_t v = r[j & 0xffffu];
+                        line[len++] = hex[v >> 4];
+                        line[len++] = hex[v & 15];
+                    }
+                    line[len] = 0;
+                    m_Log.Write("SBPCM", LogNotice, "%s", line);
+                }
+                m_Log.Write("SBPCM", LogNotice, "end");
+            }
+#endif
+            /* The video card's registers and what the renderer makes of
+             * them, for a picture that comes out wrong. */
+            else if (b == 0xf5u) {
+                static char dump[2048];
+                vga_dump_state(m_PC->vga, dump, sizeof dump);
+                for (char *line = dump, *end; *line; line = end) {
+                    end = strchr(line, '\n');
+                    if (end) *end++ = 0; else end = line + strlen(line);
+                    m_Log.Write("VGA", LogNotice, "%s", line);
+                }
+            }
 #if ADLIB_OPL_LOG
             /* Record the guest's OPL register writes, and print them. */
             else if (b == 0xf9u) {

@@ -33,6 +33,49 @@ uint32_t g_sb_port_reads, g_sb_port_writes;
 #define CIRCLE_PC_IO_NOTE(...) ((void)0)
 #endif
 
+#include "sblog.h"
+
+#if SB_IO_LOG
+#define SBLOG_N 16384u
+static uint32_t g_sblog[SBLOG_N * 2];
+static uint32_t g_sblog_n;      /* entries ever written; the ring keeps the last */
+
+void sblog_note(uint32_t tag, uint8_t val)
+{
+    const uint32_t e = (tag << 8) | val;
+    /* A driver polls a status port hundreds of times in a row. */
+    if (g_sblog_n && (tag & SBLOG_READ) &&
+        g_sblog[((g_sblog_n - 1u) % SBLOG_N) * 2u + 1u] == e)
+        return;
+    const uint32_t i = (g_sblog_n % SBLOG_N) * 2u;
+    g_sblog[i] = time_us_32();
+    g_sblog[i + 1u] = e;
+    g_sblog_n++;
+}
+
+static uint8_t g_sbpcm[65536];
+static uint32_t g_sbpcm_n;
+
+void sblog_pcm(const uint8_t *b, int n)
+{
+    for (int i = 0; i < n; i++) g_sbpcm[(g_sbpcm_n + i) & 0xffffu] = b[i];
+    g_sbpcm_n += (uint32_t)n;
+}
+
+uint32_t sblog_pcm_take(const uint8_t **ring)
+{
+    *ring = g_sbpcm;
+    return g_sbpcm_n;
+}
+
+uint32_t sblog_take(const uint32_t **entries, uint32_t *first)
+{
+    *entries = g_sblog;
+    *first = g_sblog_n > SBLOG_N ? g_sblog_n - SBLOG_N : 0;
+    return g_sblog_n;
+}
+#endif
+
 #include "mpu401.c.inl"
 void netredirect_init(CPUI386 *cpu, int enable);
 
@@ -508,6 +551,7 @@ static inline void iot_imr(PC *pc, int addr, u8 val)
 static u8 pc_io_read(void *o, int addr) {
 	frank_diag_port((uint32_t)addr, 0);
 	u8 r = _pc_io_read(o, addr);
+	if (sblog_port(addr)) sblog_note((uint32_t)addr | SBLOG_READ, r);
 	if (__builtin_expect(iot_port(addr), 0)) { iot_pc = o; io_trace_note('r', addr, r); }
 	CIRCLE_PC_IO_NOTE(0, 1, 0, addr, r, 0);
 	debug_write("R8: %ph <- %02Xh\n", addr, r);
@@ -860,6 +904,7 @@ static void pc_io_write_impl(void *o, int addr, u8 val)
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+	if (sblog_port(addr)) sblog_note((uint32_t)addr, val);
 	pc_io_write_impl(o, addr, val);
 	/* Record after dispatch so a nested byte transaction from an ISA-wide
 	 * fallback cannot replace the externally visible write. */
