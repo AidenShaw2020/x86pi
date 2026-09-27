@@ -33,6 +33,19 @@
 #include "i8257.h"
 #include "i8259.h"
 #include <hardware/sync.h>
+#include "sblog.h"
+
+/*
+ * Decode the frame at the read pointer, then move the pointer - see
+ * sb16_getsample().  The RP2350 build switched this on from its CMake file;
+ * the Circle Makefile never defined it, so the Pi decoded the byte after the
+ * one it had paid for, and whenever playback caught up with the DMA that byte
+ * was one the DMA had not written yet: whatever the 4 KB ring held a lap
+ * earlier.  Prehistorik 2 catches up at every block, and it crackled.
+ */
+#ifndef SB16_DECODE_BEFORE_ADVANCE
+#define SB16_DECODE_BEFORE_ADVANCE 1
+#endif
 
 /*
  * Does the guest talk to the card at all?
@@ -337,6 +350,10 @@ struct SB16State {
     int      irq_watch;       /* count acknowledges from here on */
     uint32_t picnow_us;       /* next refresh of the live PIC snapshot */
     volatile uint8_t irq_raise_pending;   /* core 1 asked for a rising edge */
+    /* When playback last stopped, and whether a single-cycle block ending is
+     * what stopped it; see sb16_frames_ready(). */
+    volatile uint32_t stop_us;
+    volatile uint8_t  stop_single;
 
     /* mixer state */
     int mixer_nreg;
@@ -391,6 +408,7 @@ static inline void sb_set_irq(SB16State *s, int level)
         return;
     }
     if (level) SB_DIAG[SB_DIAG_IRQ]++;
+    sblog_note(SBLOG_IRQ, (uint8_t)level);
     s->set_irq(s->pic, s->irq, level);
 }
 
@@ -550,6 +568,10 @@ static void AUD_set_active_out (SB16State *s, int i)
      * begins.
      */
     if (i && !s->active_out) sb16_diag_playback_start();
+    if (!i && s->active_out) {
+        s->stop_us = time_us_32();
+        s->stop_single = !s->dma_auto;
+    }
     s->active_out = i;
 }
 
@@ -733,6 +755,10 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
         }
     }
 
+    /* Probe: the ring when a block is armed, and what it was armed with. */
+    sblog_note(0x40000u | ((s->audio_q - s->audio_p) & 0xffffu), 1);
+    sblog_note(0x50000u | ((uint32_t)s->freq & 0xffffu), 0);
+    sblog_note(0x60000u | ((uint32_t)s->block_size & 0xffffu), 0);
     continue_dma8 (s);
     speaker (s, 1);
 }
@@ -1742,6 +1768,7 @@ void sb16_poll (SB16State *s)
     if (s->irq_raise_pending) {
         s->irq_raise_pending = 0;
         __dmb();
+        sblog_note(SBLOG_IRQ, 1);
         s->set_irq(s->pic, s->irq, 1);
     }
 
@@ -1766,6 +1793,8 @@ void sb16_poll (SB16State *s)
         s->irq_watch = 1;
         SB_DIAG[SB_DIAG_ACKS] = 0;
         SB_DIAG[SB_DIAG_BLKIRQ]++;
+        /* Probe: the ring when the completion interrupt goes out. */
+        sblog_note(0x40000u | ((s->audio_q - s->audio_p) & 0xffffu), 2);
         sb_set_irq(s, 1);
         SB_DIAG[SB_DIAG_PICPOST] = i8259_debug_master(s->pic);
     }
@@ -2099,6 +2128,7 @@ static int write_audio (SB16State *s, int nchan, int dma_pos,
              * were still whatever a previous lap through the 4096-byte ring
              * had left, and one of those, decoded, is a click.
              */
+            sblog_pcm(tmpbuf, len);
             __dmb();
             s->audio_q += len;
         }
@@ -2793,12 +2823,68 @@ void sb16_starve_snapshot(uint32_t *starves, uint32_t *minfill)
  * sb16_getsample(). */
 static int16_t sb16_last_l, sb16_last_r;
 
+/*
+ * The card's output is AC coupled, as a real one is: a capacitor in the line
+ * out removes whatever constant level the samples sit at.  A first-order
+ * high-pass at about 10 Hz, far below anything heard.
+ *
+ * It matters because DOS games do not centre their samples.  Prehistorik 2's
+ * mixed buffer sits around -10000 of 32768, and every time a single-cycle
+ * block ended the output fell from there to zero for the fraction of a
+ * millisecond the guest took to arm the next one - a square wave at the
+ * block rate, 43 Hz, loud over the music.  With the level removed and the
+ * last sample held through the handover there is no step to hear, and a
+ * held level at the end of an effect drains away instead of clicking.
+ */
+static int32_t sb16_dc_x[2], sb16_dc_y[2];
+
+static inline int sb16_dc_block(int ch, int32_t x)
+{
+    /* y = x - x' + R y', R = 1 - 2 pi 10 / 44100, y kept with 8 fraction bits */
+    const int32_t y = (x - sb16_dc_x[ch]) * 256 +
+                      (int32_t)(((int64_t)sb16_dc_y[ch] * 32721) >> 15);
+    sb16_dc_x[ch] = x;
+    sb16_dc_y[ch] = y;
+    const int32_t o = y >> 8;
+    return o > 32767 ? 32767 : o < -32768 ? -32768 : o;
+}
+
+static inline void sb16_out(int16_t l, int16_t r, int *r_v, int *l_v)
+{
+    *l_v += sb16_dc_block(0, l);
+    *r_v += sb16_dc_block(1, r);
+}
+
+uint32_t sb16_frames_ready(SB16State *s)
+{
+    if (s->bytes_per_second <= 0)
+        return 0xffffffffu;
+    const uint32_t fill = s->audio_q - s->audio_p;
+    if (fill > AUDIO_BUF_LEN) return 0xffffffffu;
+    if (!s->active_out && !fill) {
+        /*
+         * Between two single-cycle blocks.  The driver arms the next one as
+         * soon as it has taken the interrupt, and a real card never goes
+         * quiet in between; waiting a few milliseconds for it costs nothing
+         * but a little of the output queue, where not waiting is a hole at
+         * every block.  A stream that has really ended stops being waited
+         * for as soon as the time is up.
+         */
+        if (s->stop_single && (uint32_t)(time_us_32() - s->stop_us) < 15000u)
+            return 0;
+        return 0xffffffffu;
+    }
+    return (uint32_t)(((uint64_t)fill * SOUND_FREQUENCY) / (uint32_t)s->bytes_per_second);
+}
+
 void sb16_getsample(SB16State *s, int* r_v, int* l_v) {
     if (!s->active_out && s->audio_q == s->audio_p) {
 #if defined(CIRCLE_PC_STATS)
         g_sb16_gap_frames++;
         sb16_gap_len++;
 #endif
+        /* Between two blocks the DAC holds its last value. */
+        sb16_out(sb16_last_l, sb16_last_r, r_v, l_v);
         return;
     }
 #if defined(CIRCLE_PC_STATS)
@@ -2821,6 +2907,7 @@ void sb16_getsample(SB16State *s, int* r_v, int* l_v) {
     __dmb();
     if (len > AUDIO_BUF_LEN) {
         s->audio_p = s->audio_q;
+        sb16_out(sb16_last_l, sb16_last_r, r_v, l_v);
         return;
     }
 
@@ -2838,8 +2925,10 @@ void sb16_getsample(SB16State *s, int* r_v, int* l_v) {
     }
 
     /* Direct DAC is still filling its cushion; see sb16_direct_dac(). */
-    if (s->dac_hold && !s->active_out)
+    if (s->dac_hold && !s->active_out) {
+        sb16_out(sb16_last_l, sb16_last_r, r_v, l_v);
         return;
+    }
 
     static uint32_t phase = 0;
     uint32_t step = ((uint32_t)s->freq << 16) / SOUND_FREQUENCY;
@@ -2938,6 +3027,27 @@ void sb16_getsample(SB16State *s, int* r_v, int* l_v) {
         sb16_last_r = r;
     }
 
-    *l_v += l;
-    *r_v += r;
+    /*
+     * Between two samples, not a staircase.
+     *
+     * Each sample used to be repeated until the next - at 8403 Hz, five
+     * output frames of the same value - and a staircase carries images of
+     * the whole signal above half its own rate, all the way up the audible
+     * band.  At 22 kHz those are faint; at the 8 kHz of Prehistorik 2's
+     * effects they are the loudest thing after the effect itself, heard as
+     * crackle and distortion.  A card has a filter after its DAC for this.
+     * Straight lines between samples, one sample late, take most of it away.
+     */
+    static int16_t ip_prev_l, ip_prev_r, ip_cur_l, ip_cur_r;
+    if (advance > 0) {
+        ip_prev_l = ip_cur_l; ip_prev_r = ip_cur_r;
+        ip_cur_l = l; ip_cur_r = r;
+    }
+    if (step < 0x10000u) {
+        const int32_t f = (int32_t)phase;          /* towards the next, of 65536 */
+        l = (int16_t)(ip_prev_l + (((int64_t)(ip_cur_l - ip_prev_l) * f) >> 16));
+        r = (int16_t)(ip_prev_r + (((int64_t)(ip_cur_r - ip_prev_r) * f) >> 16));
+    }
+
+    sb16_out(l, r, r_v, l_v);
 }

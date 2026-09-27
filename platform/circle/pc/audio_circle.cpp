@@ -167,6 +167,27 @@ void CircleAudio::Pump(PC *pc)
         if (due > ready) due = ready;
         if (!due) return;
     }
+    /*
+     * No more than the Sound Blaster has been given, while it is playing and
+     * the output still has something in hand.
+     *
+     * A pass renders up to FramesPerPump frames in one go, and the card can
+     * only have what the DMA has copied - which for a single-cycle transfer
+     * is at most half a block ahead of playback.  Prehistorik 2 plays 168-byte
+     * blocks at 8403 Hz: 20 ms, ten of them in the ring.  One pass of 512
+     * frames wanted twelve, so every block ran dry part-way through,
+     * stretched from 20 ms to 23, and its completion interrupt came only
+     * once the ring was empty - a hole at every block, 43 a second, heard
+     * as a loud buzz over the game's music.  Taking only what is there lets
+     * core 0 top the ring up between passes and the interrupt arrive while
+     * the tail is still playing, as it is meant to.  Below a quarter of the
+     * queue the output comes first.
+     */
+    if (pc->sb16_enabled && queued > capacity / 4) {
+        const uint32_t ready = sb16_frames_ready(pc->sb16);
+        if (due > ready) due = ready;
+        if (!due) return;
+    }
     /* The same for the SoundFont synthesiser on core 3. */
     if (pc->mpu401_enabled && gmsynth_active()) {
         const uint32_t ready = gmsynth_ready();

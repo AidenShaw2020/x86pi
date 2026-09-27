@@ -26,6 +26,9 @@ SB16State *sb16_new(
     void (*set_irq)(void *pic, int irq, int level));
 
 void sb16_getsample(SB16State *s, int* r_v, int* l_v);
+/* Output frames the card can supply from what the DMA has delivered, while
+ * it is playing; UINT32_MAX when it is not.  Core 1, for the mixer. */
+uint32_t sb16_frames_ready(SB16State *s);
 
 /* Read and clear the playback-starvation counters for the window since the
  * last call. minfill comes back as 0xffffffff if output was never active. */
