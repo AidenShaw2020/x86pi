@@ -572,6 +572,109 @@ static void vbe_update_vgaregs(VGAState *s)
     s->cr[VGA_CRTC_MAX_SCAN] &= ~0x9f; /* no double scan */
 }
 
+#if !defined(SCALE_3_2) && !defined(SWAPXY) && BPP == 32
+/*
+ * Text a scan line at a time, for what the cell renderer below cannot show.
+ *
+ * That renderer draws whole character cells from the start address down, so
+ * it has no place for the split screen (below the line compare the card
+ * fetches from address zero again), a preset row scan (the top row starts
+ * part-way into its cells), pixel panning, or more rows than its cache holds.
+ * Prehistorik 2's crack intro uses the first three at once: a text screen
+ * scrolling smoothly in both directions above line 129, and the HYBRID logo
+ * with its wavy borders fixed below it, in the memory at address zero.  Only
+ * the scroller ever appeared.
+ *
+ * Everything is redrawn on every refresh; this path is taken only while one
+ * of those registers is in use.
+ */
+static void vga_text_lines(VGAState *s, const uint8_t *const font_base[2],
+                           int cols, int cwidth, int cheight,
+                           uint32_t chars_per_row, uint32_t start_addr,
+                           SimpleFBDrawFunc *redraw_func, void *opaque)
+{
+    FBDevice *fb_dev = s->fb_dev;
+    const uint8_t *vram = s->vga_ram;
+    int lines = (s->cr[0x12] | ((s->cr[0x07] & 0x02) << 7) |
+                 ((s->cr[0x07] & 0x40) << 3)) + 1;
+    if (cols > MAX_TEXT_WIDTH) cols = MAX_TEXT_WIDTH;
+    int w = cols * cwidth;
+    if (w > fb_dev->width) w = fb_dev->width;
+    if (lines > fb_dev->height) lines = fb_dev->height;
+    const int x1 = (fb_dev->width - w) / 2, y1 = (fb_dev->height - lines) / 2;
+    if (x1 != s->last_draw_x || y1 != s->last_draw_y ||
+        w != s->last_draw_w || lines != s->last_draw_h) {
+        memset(fb_dev->fb_data, 0, (size_t)fb_dev->height * fb_dev->stride);
+        s->last_draw_x = x1; s->last_draw_y = y1;
+        s->last_draw_w = w; s->last_draw_h = lines;
+    }
+    /* So that the cell renderer repaints everything when it takes over. */
+    s->last_width = -1;
+
+    const uint32_t line_compare = s->cr[0x18] | ((s->cr[0x07] & 0x10) << 4) |
+                                  ((s->cr[0x09] & 0x40) << 3);
+    const int dscan = s->cr[0x09] >> 7;
+    /* Attribute register 13h: in nine-dot modes 8 means no shift and 0-7
+     * shift one to eight dots; in eight-dot modes 0-7 are the shift. */
+    const int p = s->ar[0x13] & 0x0f;
+    int pan = cwidth == 9 ? (p >= 8 ? 0 : p + 1) : (p & 7);
+    const uint32_t cursor_addr = (s->cr[0x0e] << 8) | s->cr[0x0f];
+    const unsigned cstart = s->cr[0x0a], cend = s->cr[0x0b] & 0x1f;
+
+    uint32_t row_addr = start_addr + ((s->cr[0x08] >> 5) & 3);
+    int rs = s->cr[0x08] & 0x1f, dcount = 0, split = 0;
+    static uint32_t buf[(MAX_TEXT_WIDTH + 1) * 9];
+
+    for (int y = 0; y < lines; y++) {
+        if (!split && (uint32_t)y > line_compare) {
+            split = 1;
+            row_addr = 0;
+            rs = 0;
+            dcount = 0;
+            /* Pixel panning compatibility: the panel does not scroll. */
+            if (s->ar[0x10] & 0x20) pan = 0;
+        }
+        uint32_t *o = buf;
+        for (int cx = 0; cx <= cols; cx++) {    /* one more for the panning */
+            const uint32_t a = ((row_addr + cx) * 4u) & 0x1fffcu;
+            const unsigned ch = vram[a], at = vram[a + 1];
+            unsigned bg = at >> 4;
+            int blinks = 0;
+            if (s->ar[0x10] & 0x08) {
+                blinks = (bg & 8) != 0;
+                bg &= 7;
+            }
+            const uint32_t bgc = s->last_palette[bg];
+            uint32_t fgc = s->last_palette[at & 0x0f];
+            if (blinks && !s->cursor_visible_phase) fgc = bgc;
+            unsigned bits = rs < cheight ? font_base[(at >> 3) & 1][(32u * ch + rs) * 4u] : 0;
+            if (row_addr + cx == cursor_addr && !(cstart & 0x20) &&
+                s->cursor_visible_phase &&
+                rs >= (int)(cstart & 0x1f) && rs <= (int)cend)
+                bits = 0xff;
+            for (int b = 7; b >= 0; b--)
+                *o++ = ((bits >> b) & 1) ? fgc : bgc;
+            if (cwidth == 9)
+                *o++ = (ch >= 0xb0 && ch <= 0xdf && (s->ar[0x10] & 0x04) &&
+                        (bits & 1)) ? fgc : bgc;
+        }
+        memcpy(fb_dev->fb_data + (size_t)(y1 + y) * fb_dev->stride + (size_t)x1 * 4,
+               buf + pan, (size_t)w * 4);
+        /* Scan doubling clocks the row scan counter every other line. */
+        if (dscan && !dcount) {
+            dcount = 1;
+            continue;
+        }
+        dcount = 0;
+        if (++rs >= cheight) {
+            rs = 0;
+            row_addr += chars_per_row;
+        }
+    }
+    redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
+}
+#endif
+
 /* the text refresh is just for debugging and initial boot message, so
    it is very incomplete */
 static void vga_text_refresh(VGAState *s,
@@ -623,6 +726,20 @@ static void vga_text_refresh(VGAState *s,
     
     width1 = width * cwidth;
     height1 = height * cheight;
+#if !defined(SCALE_3_2) && !defined(SWAPXY) && BPP == 32
+    {
+        const uint32_t lc = s->cr[0x18] | ((s->cr[0x07] & 0x10) << 4) |
+                            ((s->cr[0x09] & 0x40) << 3);
+        const int p = s->ar[0x13] & 0x0f;
+        const int pan = cwidth == 9 ? (p >= 8 ? 0 : p + 1) : (p & 7);
+        if ((s->cr[0x08] & 0x7f) || pan || lc + 1 < (uint32_t)height1 ||
+            height > MAX_TEXT_HEIGHT || cheight > 16) {
+            vga_text_lines(s, font_base, width, cwidth, cheight,
+                           line_offset / 4, start_addr, redraw_func, opaque);
+            return;
+        }
+    }
+#endif
 #if defined(SCALE_3_2) || defined(SWAPXY)
 #ifdef SCALE_3_2
     if (fb_dev->width * 3 / 2 < width1 || fb_dev->height * 3 / 2 < height1 ||
@@ -1100,14 +1217,30 @@ static void vga_graphic_refresh(VGAState *s,
             y1 = 0;
         }
         uint32_t addr = addr1;
-        if (!(s->cr[0x17] & 1)) {
-            int shift;
-            /* CGA compatibility handling */
-            shift = 14 + ((s->cr[0x17] >> 6) & 1);
-            addr = (addr & ~(1 << shift)) | ((y1 & 1) << shift);
-        }
-        if (!(s->cr[0x17] & 2)) {
-            addr = (addr & ~0x8000) | ((y1 & 2) << 14);
+        /*
+         * CR17 bits 0 and 1 put the row scan counter on address lines 13 and
+         * 14: the CGA's interleaved banks.  What reaches them is the row scan
+         * counter - the line within the character row - and scan doubling
+         * clocks that counter at half the line rate.
+         *
+         * In the CGA shift mode each y1 is a source line of a two-line row,
+         * so y1 is that counter.  Everywhere else y1 counts whole character
+         * rows, and using it made every other row come from the other bank.
+         * Prehistorik 2 draws its level map in mode 0Dh with CR17 bit 0
+         * clear, doubled lines and one line per row: the counter never
+         * leaves zero on a real card, and here every second row showed the
+         * empty bank above - a picture striped with black.
+         */
+        if ((s->cr[0x17] & 3) != 3) {
+            const unsigned rs = shift_control == 1 ? (unsigned)y1 :
+                (unsigned)(multi_scan - multi_run) >> double_scan;
+            if (!(s->cr[0x17] & 1)) {
+                const int shift = 14 + ((s->cr[0x17] >> 6) & 1);
+                addr = (addr & ~(1u << shift)) | ((rs & 1) << shift);
+            }
+            if (!(s->cr[0x17] & 2)) {
+                addr = (addr & ~0x8000u) | ((rs & 2) << 14);
+            }
         }
 #if !defined(SCALE_3_2) && !defined(SWAPXY) && BPP == 32
         if (vbe_rows && s->vbe_shadow &&
@@ -1386,7 +1519,8 @@ static void vga_graphic_refresh(VGAState *s,
     row_done:
 #endif
         if (!multi_run) {
-            int mask = (s->cr[0x17] & 3) ^ 3;
+            /* A CGA row is two source lines; any other row is one step. */
+            int mask = shift_control == 1 ? (s->cr[0x17] & 3) ^ 3 : 0;
             if ((y1 & mask) == mask)
                 addr1 += line_offset;
             y1++;
@@ -2842,6 +2976,65 @@ static void vga_initmode(VGAState *s)
 //=============================================================================
 // Accessor functions for hardware VGA driver integration
 //=============================================================================
+
+int vga_dump_state(VGAState *s, char *buf, int size)
+{
+    int n = 0;
+#define DUMP(...) do { if (n < size) n += snprintf(buf + n, size - n, __VA_ARGS__); } while (0)
+    DUMP("msr=%02x graphic_mode=%d gr6=%02x ar10=%02x sr1=%02x sr3=%02x sr4=%02x force_8dm=%d fb=%dx%d\n",
+         s->msr, s->graphic_mode, s->gr[6], s->ar[0x10], s->sr[1], s->sr[3], s->sr[4],
+         s->force_8dm, s->fb_dev->width, s->fb_dev->height);
+    DUMP("cr:");
+    for (int i = 0; i < 0x19; i++) DUMP(" %02x", s->cr[i]);
+    DUMP("\nsr:");
+    for (int i = 0; i < 5; i++) DUMP(" %02x", s->sr[i]);
+    DUMP(" gr:");
+    for (int i = 0; i < 9; i++) DUMP(" %02x", s->gr[i]);
+    DUMP(" ar10-14:");
+    for (int i = 0x10; i < 0x15; i++) DUMP(" %02x", s->ar[i]);
+    /* What vga_text_refresh() computes from them. */
+    const int cheight = (s->cr[9] & 0x1f) + 1;
+    const int cwidth = (!s->force_8dm && !(s->sr[1] & 0x01)) ? 9 : 8;
+    const int width = s->cr[0x01] + 1;
+    const int vde = s->cr[0x12] | ((s->cr[0x07] & 0x02) << 7) | ((s->cr[0x07] & 0x40) << 3);
+    const int rows = (vde + 1) / cheight;
+    const unsigned start = s->cr[0x0d] | (s->cr[0x0c] << 8);
+    DUMP("\ntext geometry: %d cols x %d rows, cell %dx%d, %dx%d pixels, doublescan=%d, line_offset=%d, start=%04x, fits=%d\n",
+         width, rows, cwidth, cheight, width * cwidth, rows * cheight, (s->cr[9] >> 7) & 1,
+         s->cr[0x13] * 2, start,
+         !(s->fb_dev->width < width * cwidth || s->fb_dev->height < rows * cheight ||
+           width > MAX_TEXT_WIDTH || rows > MAX_TEXT_HEIGHT));
+    /* Which characters the screen is made of, and the first of the most
+     * used ones as they stand in the font. */
+    uint32_t count[256] = { 0 };
+    for (int i = 0; i < width * rows && i < 132 * 132; i++) {
+        const uint32_t a = ((start + i) * 4u) & 0x1fffcu;
+        if ((int)a < s->vga_ram_size) count[s->vga_ram[a]]++;
+    }
+    int top[4] = { -1, -1, -1, -1 };
+    for (int c = 0; c < 256; c++)
+        for (int k = 0; k < 4; k++)
+            if (count[c] && (top[k] < 0 || count[c] > count[top[k]])) {
+                for (int m = 3; m > k; m--) top[m] = top[m - 1];
+                top[k] = c;
+                break;
+            }
+    const uint32_t v = s->sr[3];
+    const uint8_t *font = s->vga_ram + (((v >> 4) & 1) | ((v << 1) & 6)) * 8192 * 4 + 2;
+    for (int k = 0; k < 4 && top[k] >= 0; k++) {
+        DUMP("char %02x x%u font:", top[k], (unsigned)count[top[k]]);
+        for (int r = 0; r < 16; r++) DUMP(" %02x", font[(32 * top[k] + r) * 4]);
+        DUMP("\n");
+    }
+    DUMP("row0 ch/at:");
+    for (int i = 0; i < 40; i++) {
+        const uint32_t a = ((start + i) * 4u) & 0x1fffcu;
+        DUMP(" %02x%02x", s->vga_ram[a], s->vga_ram[a + 1]);
+    }
+    DUMP("\n");
+#undef DUMP
+    return n < size ? n : size - 1;
+}
 
 // Visible columns are derived from CRTC Horizontal Display End (index 0x01).
 // In text modes this is 39 (40 cols) or 79 (80 cols).
