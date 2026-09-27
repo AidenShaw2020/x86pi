@@ -1,0 +1,15 @@
+*.d
+*.lst
+kernel8.img
+kernel8-smoke.img
+kernel8-pc.img
+kernel8-pc-diag.img
+
+# Captured while investigating, not inputs to the build.  The conclusions
+# belong in the notes and in commit messages; these are the raw material and
+# they are large, numerous and specific to one sitting.
+debug/*.log
+debug/audio/*.wav
+debug/live/live.jpg
+__pycache__/
+pc/tests/diagnostic_regression

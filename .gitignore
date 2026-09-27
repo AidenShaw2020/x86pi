@@ -1,0 +1,44 @@
+*~
+*.o
+*.a
+*.elf
+*.hex
+*.uf2
+*.dis
+*.map
+*.dSYM/
+.depends
+.claude/
+build/
+build-*/
+bin/
+.DS_Store
+tiny386
+tiny386_nosdl
+tiny386_kvm
+wifikbd
+initnet
+release
+.vscode/
+
+# Local investigation artifacts. Keep conclusions in the checked-in notes,
+# not complete compiler trees and one-off source snapshots.
+snapshots/
+*.before-*
+*.readstatus-attempt
+*.block-jit-v1-tested
+apply-*.py
+i386-v*.c
+v*-to-v*.diff
+*_VALIDATION.txt
+SHA256SUMS*.txt
+*.patch
+fix-z2-hdmi.ps1
+*.pre-rate
+
+# Session handoff notes. These stay local - they are never published.
+HANDOFF*.md
+*.bak
+
+# The Raspberry Pi firmware is a card file, not a build product.
+!sdcard/start.elf

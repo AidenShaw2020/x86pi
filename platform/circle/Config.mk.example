@@ -1,0 +1,6 @@
+# Copy to the pinned Circle checkout's Config.mk before building libraries.
+AARCH = 64
+RASPPI = 3
+PREFIX64 = aarch64-linux-gnu-
+ARCHCPU = -mcpu=cortex-a53 -mlittle-endian -mno-outline-atomics
+DEFINE += -DDEPTH=32

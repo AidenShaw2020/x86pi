@@ -1,0 +1,4 @@
+#pragma once
+namespace std {
+template<class T> constexpr const T& min(const T& a, const T& b) { return b < a ? b : a; }
+}

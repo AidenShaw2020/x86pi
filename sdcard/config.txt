@@ -1,0 +1,20 @@
+# X86Pi - Raspberry Pi 3 / 3B+ boot configuration
+arm_64bit=1
+kernel_address=0x80000
+kernel=kernel8.img
+initial_turbo=0
+
+# The serial console (GPIO14/15, 115200 8N1) of a development build.
+enable_uart=1
+core_freq=250
+
+# 1920x1080p60 over HDMI; the emulator scales the guest's picture into it.
+hdmi_force_hotplug=1
+hdmi_drive=2
+hdmi_group=1
+hdmi_mode=16
+disable_overscan=1
+framebuffer_width=1920
+framebuffer_height=1080
+framebuffer_depth=32
+framebuffer_ignore_alpha=1

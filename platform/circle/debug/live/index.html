@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<title>tiny386 live</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0b0d; color:#c9c9cf;
+         font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;
+         display:flex; flex-direction:column; align-items:center; gap:.75rem; padding:1rem; }
+  img { width:min(100%,1280px); image-rendering:pixelated;
+        border:1px solid #2a2a31; border-radius:6px; background:#000; display:block; }
+  .bar { display:flex; gap:1rem; align-items:center; font-variant-numeric:tabular-nums; }
+  .dot { width:.6rem; height:.6rem; border-radius:50%; background:#3fb950; }
+  .stale .dot { background:#d29922; }
+</style>
+</head>
+<body>
+  <img id="v" alt="obraz z Pi">
+  <div class="bar" id="bar"><span class="dot"></span><span id="s">spouštím…</span></div>
+<script>
+  const img = document.getElementById('v');
+  const s = document.getElementById('s');
+  const bar = document.getElementById('bar');
+  let n = 0, last = Date.now(), t0 = Date.now(), fps = 0;
+  function tick() {
+    const probe = new Image();
+    probe.onload = () => {
+      img.src = probe.src; n++; last = Date.now();
+      const now = Date.now();
+      if (now - t0 >= 1000) { fps = Math.round(n * 1000 / (now - t0)); n = 0; t0 = now; }
+      s.textContent = `${fps} snímků/s · ${probe.naturalWidth}×${probe.naturalHeight}`;
+      bar.classList.remove('stale');
+      setTimeout(tick, 40);
+    };
+    probe.onerror = () => {
+      if (Date.now() - last > 3000) {
+        bar.classList.add('stale');
+        s.textContent = 'čekám na snímky…';
+      }
+      setTimeout(tick, 120);
+    };
+    probe.src = 'live.jpg?t=' + Date.now();
+  }
+  tick();
+</script>
+</body>
+</html>

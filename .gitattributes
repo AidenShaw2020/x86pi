@@ -1,0 +1,6 @@
+# Shell scripts are run inside the build container, where a carriage return
+# is part of the command rather than the end of the line: dash rejects
+# "set -eu" outright, and platform/circle/build.sh is the script that
+# copies the patched Circle sources into place.  core.autocrlf gives a
+# Windows checkout CRLF unless it is told otherwise here.
+*.sh text eol=lf
