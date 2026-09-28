@@ -62,6 +62,8 @@ int vga_get_line_compare(VGAState *s);   // Scanline where address resets to 0
 /* The card's registers and what the renderer makes of them, as text lines
  * separated by '\n', for a diagnostic dump; returns the length. */
 int vga_dump_state(VGAState *s, char *buf, int size);
+/* The i-th newest register write (0 = newest) as a text line; 0 past the end. */
+int vga_reg_ring_line(int i, char *buf, int size);
 bool vga_in_retrace(VGAState *s);        // Check if in vertical retrace
 int vga_get_cursor_blink_phase(VGAState *s);  // Cursor blink phase (1=visible, 0=hidden)
 int vga_get_char_height(VGAState *s);         // Character cell height (typically 8 or 16)

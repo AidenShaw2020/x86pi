@@ -47,7 +47,9 @@ from it:
 | `F6` | Press the front panel's reset button |
 | `FA`, address (4, LE), length (2, LE) | Print that much guest memory |
 | `FD` / `FC` / `FB` | Print / re-arm / freeze the guest exception ring |
-| `F5` | Print the video card's registers and the text geometry derived from them |
+| `F5` | Print the video card's registers and the text geometry derived from them, and the start address, line compare and panning of recent refreshes |
+| `F1` | Print the video card's last 256 register writes, newest first (plane and bit mask left out) |
+| `F2` | Print all 256 KB of VGA memory in hex, four planes interleaved |
 | `F4` / `F3` | Print the Sound Blaster log / the last 32 KB of PCM it was given (`SBLOG=1`) |
 | `F9` / `F8` | Start / print the OPL register log (`OPLLOG=1`) |
 

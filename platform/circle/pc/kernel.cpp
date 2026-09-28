@@ -548,13 +548,39 @@ void CKernel::DrainSerialKeys()
             /* The video card's registers and what the renderer makes of
              * them, for a picture that comes out wrong. */
             else if (b == 0xf5u) {
-                static char dump[2048];
+                static char dump[8192];
                 vga_dump_state(m_PC->vga, dump, sizeof dump);
                 for (char *line = dump, *end; *line; line = end) {
                     end = strchr(line, '\n');
                     if (end) *end++ = 0; else end = line + strlen(line);
                     m_Log.Write("VGA", LogNotice, "%s", line);
                 }
+            }
+            /* The video card's register writes, newest first. */
+            else if (b == 0xf1u) {
+                char line[80];
+                for (int i = 0; vga_reg_ring_line(i, line, sizeof line) > 0; i++)
+                    m_Log.Write("VGAREG", LogNotice, "%s", line);
+                m_Log.Write("VGAREG", LogNotice, "end");
+            }
+            /* The whole 256 KB of VGA memory, as the card stores it: four
+             * planes interleaved, one dword per address. */
+            else if (b == 0xf2u) {
+                static const char hex[] = "0123456789abcdef";
+                const uint8_t *v = m_PC->vga->vga_ram;
+                char line[8 + 2 * 128 + 1];
+                m_Log.Write("VRAM", LogNotice, "begin");
+                for (uint32_t a = 0; a < 0x40000u; a += 128) {
+                    int len = 0;
+                    for (int k = 7; k >= 0; k--) line[len++] = hex[(a >> (4 * k)) & 15];
+                    for (uint32_t j = 0; j < 128; j++) {
+                        line[len++] = hex[v[a + j] >> 4];
+                        line[len++] = hex[v[a + j] & 15];
+                    }
+                    line[len] = 0;
+                    m_Log.Write("VRAM", LogNotice, "%s", line);
+                }
+                m_Log.Write("VRAM", LogNotice, "end");
             }
 #if ADLIB_OPL_LOG
             /* Record the guest's OPL register writes, and print them. */

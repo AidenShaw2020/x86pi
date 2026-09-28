@@ -984,6 +984,9 @@ static bool vbe_row_same(const uint8_t *a, const uint8_t *b, size_t n)
     return true;
 }
 
+static uint32_t g_vga_refresh_ring[64], g_vga_refresh_ringt[64];
+static uint32_t g_vga_refresh_ringn, g_vga_refresh_seen;
+
 static void vga_graphic_refresh(VGAState *s,
                                 SimpleFBDrawFunc *redraw_func, void *opaque,
                                 int full_update)
@@ -1027,6 +1030,17 @@ static void vga_graphic_refresh(VGAState *s,
         line_offset = s->vbe_line_offset;
         start_addr = s->vbe_start_addr;
         line_compare = 0xffffffffu;
+    }
+    {
+        /* What each refresh took from the registers, when it changed. */
+        const uint32_t e = (start_addr & 0xffff) << 16 | (line_compare & 0x3ff) << 4 |
+                           (s->ar[0x13] & 15);
+        g_vga_refresh_seen++;
+        if (e != g_vga_refresh_ring[(g_vga_refresh_ringn - 1) & 63]) {
+            g_vga_refresh_ring[g_vga_refresh_ringn & 63] = e;
+            g_vga_refresh_ringt[g_vga_refresh_ringn & 63] = g_vga_refresh_seen;
+            g_vga_refresh_ringn++;
+        }
     }
     uint32_t addr1 = 4 * start_addr;
     uint8_t *vram = s->vga_ram;
@@ -1895,6 +1909,18 @@ done:
     return val;
 }
 
+static uint32_t g_vga_reg_ring[256], g_vga_reg_ringt[256], g_vga_reg_ringn;
+
+int vga_reg_ring_line(int i, char *buf, int size)
+{
+    if (i < 0 || i >= 256 || (uint32_t)i >= g_vga_reg_ringn) return 0;
+    const uint32_t k = g_vga_reg_ringn - 1 - i;   /* 0 = newest */
+    const uint32_t e = g_vga_reg_ring[k & 255];
+    return snprintf(buf, size, "%3d w=%08x %03x[%02x]=%02x", i,
+                    (unsigned)g_vga_reg_ringt[k & 255], (unsigned)(e >> 20),
+                    (unsigned)((e >> 8) & 0xff), (unsigned)(e & 0xff));
+}
+
 void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
 {
     int index;
@@ -1907,6 +1933,26 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
 #ifdef DEBUG_VGA
     printf("VGA: write addr=0x%04x data=0x%02x\n", addr, val);
 #endif
+    {
+        /* Register writes other than the plane mask and bit mask, which a
+         * sprite loop rewrites all the time; repeats are collapsed. */
+        int idx = -1;
+        switch (addr) {
+        case 0x3c0: if (s->ar_flip_flop) idx = s->ar_index & 0x1f; break;
+        case 0x3c2: idx = 0; break;
+        case 0x3c5: if (s->sr_index != 2) idx = s->sr_index; break;
+        case 0x3cf: if (s->gr_index != 8) idx = s->gr_index; break;
+        case 0x3b5: case 0x3d5: idx = s->cr_index; break;
+        }
+        if (idx >= 0) {
+            const uint32_t e = (addr & 0xfff) << 20 | (idx & 0xff) << 8 | (val & 0xff);
+            if (e != g_vga_reg_ring[(g_vga_reg_ringn - 1) & 255]) {
+                g_vga_reg_ring[g_vga_reg_ringn & 255] = e;
+                g_vga_reg_ringt[g_vga_reg_ringn & 255] = g_vram_writes;
+                g_vga_reg_ringn++;
+            }
+        }
+    }
 
     switch(addr) {
     case 0x3c0:
@@ -2402,8 +2448,18 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
      * "S_V_G_A_ _C_o_m_p...", and the memory figures it patches into its own
      * template never replaced the "xxxxx" placeholders.  Measured on the
      * board at that moment: gr[5]=0x00, gr[6]=0x0e, sr[4]=0x02.
+     *
+     * gr[5] bit 4 does not belong in the test at all.  It turns on odd/even
+     * addressing for reads only, and without Chain Odd/Even it does not
+     * change the address the planes see.  Jazz Jackrabbit restores the
+     * background under its sprites with latch copies in Mode X and writes
+     * gr[5]=0x59 for them - write mode 1, read mode 1 and that bit - with
+     * gr[6]=0x05 and sr[4]=0x06.  Here every one of those copies went down
+     * this branch: the read loaded no latch and the write stored the byte it
+     * had read into the text layout, so nothing under a sprite was ever
+     * restored and "GET READY" left a trail of itself down the screen.
      */
-    } else if ((s->gr[VGA_GFX_MODE] & 0x10) || (s->gr[VGA_GFX_MISC] & 0x02)) {
+    } else if (s->gr[VGA_GFX_MISC] & 0x02) {
         /* odd/even mode (aka text mode mapping) */
         plane = (s->gr[VGA_GFX_PLANE_READ] & 2) | (addr & 1);
         mask = (1 << plane);
@@ -2535,9 +2591,10 @@ uint8_t vga_mem_read(VGAState *s, uint32_t addr)
         /* chain 4 mode : simplest access */
 //        assert(addr < s->vram_size);
         ret = s->vga_ram[addr];
-    } else if ((s->gr[VGA_GFX_MODE] & 0x10) || (s->gr[VGA_GFX_MISC] & 0x02)) {
+    } else if (s->gr[VGA_GFX_MISC] & 0x02) {
         /* odd/even mode; the read path has to agree with the write path
-         * above, or a read-modify-write scrambles the screen. */
+         * above, or a read-modify-write scrambles the screen - and a latch
+         * copy has to reach the latches below. */
         plane = (s->gr[VGA_GFX_PLANE_READ] & 2) | (addr & 1);
         addr = ((addr & ~1) << 1) | plane;
         if (addr >= s->vga_ram_size) { // s->vram_size) {
@@ -3030,6 +3087,15 @@ int vga_dump_state(VGAState *s, char *buf, int size)
     for (int i = 0; i < 40; i++) {
         const uint32_t a = ((start + i) * 4u) & 0x1fffcu;
         DUMP(" %02x%02x", s->vga_ram[a], s->vga_ram[a + 1]);
+    }
+    DUMP("\n");
+    DUMP("refresh %u, start/lc/pan changes %u:", (unsigned)g_vga_refresh_seen,
+         (unsigned)g_vga_refresh_ringn);
+    for (uint32_t i = g_vga_refresh_ringn > 40 ? g_vga_refresh_ringn - 40 : 0;
+         i < g_vga_refresh_ringn; i++) {
+        const uint32_t e = g_vga_refresh_ring[i & 63];
+        DUMP(" %u:%04x/%u/%u", (unsigned)g_vga_refresh_ringt[i & 63],
+             (unsigned)(e >> 16), (unsigned)((e >> 4) & 0x3ff), (unsigned)(e & 15));
     }
     DUMP("\n");
 #undef DUMP
